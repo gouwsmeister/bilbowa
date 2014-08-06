@@ -367,21 +367,27 @@ int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count) {
 void UpdateEmbeddings(real *embeddings, real *grads, int offset, 
 					  int num_updates, real *deltas, real weight) {
   int a;
+  // TODO: Fudge factor should be small, ~1e-6
   real step, fudge_factor = 1.0;
   for (a = 0; a < num_updates; a++) {
-	// We use Adagrad for automatic learning rate selection
-	if (adagrad) {
-	  grads[offset + a] += (deltas[a] * deltas[a]);
-	  step = alpha * deltas[a] / (fudge_factor + sqrt(grads[offset + a]));
-	} else {
-	  step = alpha * deltas[a];
-	}
-	if (step != step) {
-	  fprintf(stderr, "ERROR: step == NaN\n");
-	}
-    // TODO: Clip updates to [-0.1, +0.1]
-	embeddings[offset + a] += weight * step;   
-  }
+    if (adagrad) {
+      // Use Adagrad for automatic learning rate selection
+      grads[offset + a] += (deltas[a] * deltas[a]);
+      step = alpha * deltas[a] / (fudge_factor + sqrt(grads[offset + a]));
+    } else {
+      // Regular SGD
+      step = alpha * deltas[a];
+    }
+    if (step != step) {
+      fprintf(stderr, "ERROR: step == NaN\n");
+    }
+      // TODO: Clip updates to [-0.1, +0.1]
+      if (CLIP_UPDATES != 0) {
+        if (step > CLIP_UPDATES) step = CLIP_UPDATES;
+        if (step < CLIP_UPDATES) step = -CLIP_UPDATES;
+      }
+      embeddings[offset + a] += weight * step;   
+    }
 }
 
 void UpdateEnFrSquaredError(int en_sen_len, int fr_sen_len, 
@@ -436,7 +442,7 @@ void *BilbowaUpdateThread(void *id) {
     fi_par1 = fopen(par_train_files[lang_id1], "rb");   // en
     fi_par2 = fopen(par_train_files[lang_id2], "rb");   // fr 
 
-	// Continue training while skipgrams are still training
+    // Continue training while skipgrams are still training
     while (MONO_DONE_TRAINING < NUM_LANG) {
       par_sen_len1 = ReadSent(fi_par1, lang_id1, par_sen1, &updates_l1);
       par_sen_len2 = ReadSent(fi_par2, lang_id2, par_sen2, &updates_l2);

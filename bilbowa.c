@@ -381,7 +381,7 @@ void *TrainModelThread(void *id) {
   real *syn0 = syn0s[lang_id];
   FILE *fi = fopen(train_file, "rb");
   FILE *fi_par = fopen(par_train_files[lang_id], "rb");
-  // this compute the sign of the gradient on the xling layer, used below
+  // this computes the sign of the gradient on the xling layer, used below
   if (lang_id % 2) xling_sign = +1;   // even ids add
   else xling_sign = -1;               // odd ids subtract
 

@@ -22,10 +22,11 @@
 #define MAX_STRING 100
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
-#define MAX_SENTENCE_LENGTH 1000
+#define MAX_SEN_LEN 1000
 #define MAX_CODE_LENGTH 40
 
 #define NUM_LANG 2
+#define CLIP_UPDATES 0.1      // biggest update per parameter per step
 
 const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
 
@@ -38,9 +39,9 @@ struct vocab_word {
 };
 
 char *mono_train_files[NUM_LANG],
-	 *par_train_files[NUM_LANG], 
-	 *noise_train_files[NUM_LANG - 1],
-	 *output_files[NUM_LANG], 
+     *par_train_files[NUM_LANG], 
+     *noise_train_files[NUM_LANG - 1],
+     *output_files[NUM_LANG], 
      *save_vocab_files[NUM_LANG], 
      *read_vocab_files[NUM_LANG];
 struct vocab_word *vocabs[NUM_LANG];
@@ -311,21 +312,25 @@ void ReadVocab(int lang_id) {
 void InitNet(int lang_id) {
   long long a, b, vocab_size = vocab_sizes[lang_id];
   real *syn0, *syn1neg, *syn0grad, *syn1negGrad;
-  a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size * sizeof(real));
+  a = posix_memalign((void **)&syn0, 128, (long long)vocab_size * layer1_size *
+      sizeof(real));
   if (syn0 == NULL) {printf("Memory allocation failed\n"); exit(1);}
   else syn0s[lang_id] = syn0;
-  a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * layer1_size * sizeof(real));
+  a = posix_memalign((void **)&syn1neg, 128, (long long)vocab_size * 
+      layer1_size * sizeof(real));
   if (syn1neg == NULL) {printf("Memory allocation failed\n"); exit(1);}
   else syn1negs[lang_id] = syn1neg;
   if (adagrad) {
-	a = posix_memalign((void **)&syn0grad, 128, (long long)vocab_size * layer1_size * sizeof(real));
+	  a = posix_memalign((void **)&syn0grad, 128, (long long)vocab_size * 
+        layer1_size * sizeof(real));
   	if (syn0grad == NULL) {printf("Memory allocation failed\n"); exit(1);}
   	else syn0grads[lang_id] = syn0grad;
-  	a = posix_memalign((void **)&syn1negGrad, 128, (long long)vocab_size * layer1_size * sizeof(real));
+  	a = posix_memalign((void **)&syn1negGrad, 128, (long long)vocab_size * 
+        layer1_size * sizeof(real));
   	if (syn1negGrad == NULL) {printf("Memory allocation failed\n"); exit(1);}
 	else syn1negGrads[lang_id] = syn1negGrad;
   }
-  for (b = 0; b < layer1_size; b++) 
+  for (b = 0; b < layer1_size; b++) { 
     for (a = 0; a < vocab_size; a++) {
       syn1neg[a * layer1_size + b] = 0;
       syn0[a * layer1_size + b] = (rand() / (real)RAND_MAX - 0.5) / layer1_size;
@@ -334,6 +339,7 @@ void InitNet(int lang_id) {
 	    syn1negGrad[a*layer1_size + b] = 0;
 	  }
     }
+  } 
 }
 
 /* Read a sentence into *sen using vocabulary for language lang_id
@@ -343,7 +349,6 @@ int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count) {
   long long word;
   int sentence_length = 0;
   struct vocab_word *vocab = vocabs[lang_id];
-
   while (1) {
     word = ReadWordIndex(fi, lang_id);
     if (feof(fi)) break;
@@ -353,13 +358,14 @@ int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count) {
     // The subsampling randomly discards frequent words while keeping the 
     // ranking the same
     if (sample > 0) {
-      real ran = (sqrt(vocab[word].cn / (sample * train_words[lang_id])) + 1) * (sample * train_words[lang_id]) / vocab[word].cn;
+      real ran = (sqrt(vocab[word].cn / (sample * train_words[lang_id])) + 1) * 
+        (sample * train_words[lang_id]) / vocab[word].cn;
       next_random = next_random * (unsigned long long)25214903917 + 11;
       if (ran < (next_random & 0xFFFF) / (real)65536) continue;
     }
     sen[sentence_length] = word;
     sentence_length++;
-    if (sentence_length >= MAX_SENTENCE_LENGTH) break;
+    if (sentence_length >= MAX_SEN_LEN) break;
   }
   return sentence_length;
 }
@@ -368,7 +374,7 @@ void UpdateEmbeddings(real *embeddings, real *grads, int offset,
 					  int num_updates, real *deltas, real weight) {
   int a;
   // TODO: Fudge factor should be small, ~1e-6
-  real step, fudge_factor = 1.0;
+  real step, fudge_factor = 1e-6;
   for (a = 0; a < num_updates; a++) {
     if (adagrad) {
       // Use Adagrad for automatic learning rate selection
@@ -382,87 +388,143 @@ void UpdateEmbeddings(real *embeddings, real *grads, int offset,
       fprintf(stderr, "ERROR: step == NaN\n");
     }
       // TODO: Clip updates to [-0.1, +0.1]
+      step = step * weight;
       if (CLIP_UPDATES != 0) {
         if (step > CLIP_UPDATES) step = CLIP_UPDATES;
-        if (step < CLIP_UPDATES) step = -CLIP_UPDATES;
+        if (step < -CLIP_UPDATES) step = -CLIP_UPDATES;
       }
-      embeddings[offset + a] += weight * step;   
+      embeddings[offset + a] += step;   
     }
 }
 
 void UpdateEnFrSquaredError(int en_sen_len, int fr_sen_len, 
-                			long long *en_sen, long long *fr_sen, 
-                			real *delta, real *syn0_e, real *syn0_f, 
-                            real weight) {
+    long long *en_sen, long long *fr_sen, real *delta, real *syn0_e, 
+    real *syn0_f, real weight) {
   int d, offset;
   // TO MINIMIZE SQUARED ERROR:
   // delta = d .5*|| e - f ||^2 = ±(e - f)
   // d/den = +delta 
   for (d = 0; d < en_sen_len; d++) {
     offset = layer1_size * en_sen[d];
-	// update in -d/den = -delta direction
-	UpdateEmbeddings(syn0_e, syn0grads[0], offset, layer1_size, delta, -weight);
+	  // update in -d/den = -delta direction
+	  UpdateEmbeddings(syn0_e, syn0grads[0], offset, layer1_size, delta, -weight);
   }
   // d/df = -delta
   for (d = 0; d < fr_sen_len; d++) {
     offset = layer1_size * fr_sen[d];
-	// update in -d/df = +delta direction
-	UpdateEmbeddings(syn0_f, syn0grads[1], offset, layer1_size, delta, weight);
+	  // update in -d/df = +delta direction
+	  UpdateEmbeddings(syn0_f, syn0grads[1], offset, layer1_size, delta, weight);
   }
 }
 
-real fpropSent(int len, long long *sen, real *delta, real *syn, real sign) {
+real fpropSent(int len, long long *sen, real *deltas, real *syn, real sign) {
   real sumSquares = 0;
   long long c, d, offset;
   for (d = 0; d < len; d++) {
      offset = layer1_size * sen[d];
      for (c = 0; c < layer1_size; c++) {
-       delta[c] += sign * syn[offset + c];    
-       sumSquares += delta[c] * delta[c];
+       deltas[c] += sign * syn[offset + c];    
+       sumSquares += deltas[c] * deltas[c];
      }
   }
   return sqrt(sumSquares);
 }
 
-/* Thread for performing the cross-lingual learning:
- * Supports both using only an L2 penalty on observed pairs (negative = 0),
- * and a negative hinge loss on observed and sampled noise pairs (negative > 0).
+/* BilBOWA++ Update (naive diagonal alignment model):
+ * TODO: More here.
  * */
-void *BilbowaUpdateThread(void *id) {
-    int par_sen_len1, par_sen_len2, 
-		lang_id1 = (int)id, lang_id2 = (int)id + 1;
-    long long par_sen1[MAX_SENTENCE_LENGTH], 
-              par_sen2[MAX_SENTENCE_LENGTH],
-			  updates_l1 = 0, updates_l2 = 0;
-    int a;
-    real *syn0_e = syn0s[lang_id1], *syn0_f = syn0s[lang_id2];
-    real enfr_delta[layer1_size], xling_balancer;
-    FILE *fi_par1, *fi_par2;
-      
-    fi_par1 = fopen(par_train_files[lang_id1], "rb");   // en
-    fi_par2 = fopen(par_train_files[lang_id2], "rb");   // fr 
-
-    // Continue training while skipgrams are still training
-    while (MONO_DONE_TRAINING < NUM_LANG) {
-      par_sen_len1 = ReadSent(fi_par1, lang_id1, par_sen1, &updates_l1);
-      par_sen_len2 = ReadSent(fi_par2, lang_id2, par_sen2, &updates_l2);
-      if (feof(fi_par1) || feof(fi_par2)) {
-          fseek(fi_par1, 0, SEEK_SET);       // recycle parallel sentences
-          fseek(fi_par2, 0, SEEK_SET);
+void BilBOWAPlusPlusUpdate(int par_sen_len1, int par_sen_len2,
+    long long *par_sen1, long long *par_sen2, real xling_weight,
+    real *deltas, real *syn0_e, real *syn0_f, real *diag_Z) { 
+  int a, i, j;
+  real align_weight, normalizer;
+  //if (par_sen_len1 > sen_max || par_sen_len2 > sen_max) {
+  //  printf("ERROR: sentence length > MAX_SEN_LEN!\n");
+  //  exit(1);
+  //}
+  // This lazily caches the normalization weights, but uses way too
+  // much memory as we're very unlikely to see all combinations of
+  // MAX_SEN_LEN * MAX_SEN_LEN combinations sentence 
+  // lengths..
+  if (diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2] == 0) normalizer = 1.0;
+  else normalizer = diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2];
+  for (i = 0; i < par_sen_len1; i++) {
+    for (j = 0; j < par_sen_len2; j++) {
+      // TODO: Add subsampling based on the PAIR of words'
+      // frequencies.
+      // Clear deltas
+      for (a = 0; a < layer1_size; a++) deltas[a] = 0; // faster?
+      //memset(deltas, 0, sizeof(real) * layer1_size);
+      // fprop
+      fpropSent(1, &par_sen1[i], deltas, syn0_e, +1);
+      fpropSent(1, &par_sen2[j], deltas, syn0_f, -1);
+      // TODO: Normalize this weight
+      align_weight = exp(-fabs(i/(real)par_sen_len1 - j/(real)par_sen_len2)) / 
+        normalizer;
+      if (normalizer == 1.0) { // cache this result
+        diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2] += align_weight;
       }
-      // FPROP
-      // RESET DELTAS
-      for (a = 0; a < layer1_size; a++) enfr_delta[a] = 0;
-      // ACCUMULATE L2 LOSS DELTA
-	  // TODO: Use syn0 / syn1neg?
-      fpropSent(par_sen_len1, par_sen1, enfr_delta, syn0_e, +1); 
-      fpropSent(par_sen_len2, par_sen2, enfr_delta, syn0_f, -1);
-      // BPROP
-	  xling_balancer = (lang_updates[0] + lang_updates[1]) / (real)(updates_l1 + updates_l2);
-      UpdateEnFrSquaredError(par_sen_len1, par_sen_len2, 
-							 par_sen1, par_sen2,
-							 enfr_delta, syn0_e, syn0_f, XLING_LAMBDA * xling_balancer);
-    } // while
+      UpdateEnFrSquaredError(1, 1, &par_sen1[i], &par_sen2[j], deltas,
+          syn0_e, syn0_f, XLING_LAMBDA * xling_weight * align_weight);
+    }
+  } 
+}
+
+
+/* Vanilla BilBOWA update (uniform alignment model). 
+ */
+void BilBOWAUpdate(int par_sen_len1, int par_sen_len2,
+    long long *par_sen1, long long *par_sen2, real xling_balancer,
+    real *deltas, real *syn0_e, real *syn0_f) {
+  int a;
+  // FPROP
+  // RESET DELTAS
+  for (a = 0; a < layer1_size; a++) deltas[a] = 0;
+  // ACCUMULATE L2 LOSS DELTA
+  // TODO: Use syn0 / syn1neg?
+  fpropSent(par_sen_len1, par_sen1, deltas, syn0_e, +1); 
+  fpropSent(par_sen_len2, par_sen2, deltas, syn0_f, -1);
+  // BPROP
+  // TODO: Enable > 2 languages
+  UpdateEnFrSquaredError(par_sen_len1, par_sen_len2, 
+    par_sen1, par_sen2, deltas, syn0_e, syn0_f, 
+    XLING_LAMBDA * xling_balancer);
+}
+
+/* Thread for performing the cross-lingual learning.
+ */
+void *BilbowaUpdateThread(void *id) {
+  int par_sen_len1, par_sen_len2, 
+  lang_id1 = (int)id, lang_id2 = (int)id + 1;
+  long long par_sen1[MAX_SEN_LEN], 
+            par_sen2[MAX_SEN_LEN],
+            updates_l1 = 0, updates_l2 = 0;
+  real *syn0_e = syn0s[lang_id1], *syn0_f = syn0s[lang_id2];
+  real deltas[layer1_size], xling_balancer,
+       *normalizations;   //[MAX_SEN_LEN * MAX_SEN_LEN] = {0.0};
+  FILE *fi_par1, *fi_par2;    
+  normalizations = calloc(MAX_SEN_LEN * MAX_SEN_LEN, 
+      sizeof(real));
+  fi_par1 = fopen(par_train_files[lang_id1], "rb");   // en
+  fi_par2 = fopen(par_train_files[lang_id2], "rb");   // fr 
+
+  // Continue training while skipgrams are still training
+  while (MONO_DONE_TRAINING < NUM_LANG) {
+    par_sen_len1 = ReadSent(fi_par1, lang_id1, par_sen1, &updates_l1);
+    par_sen_len2 = ReadSent(fi_par2, lang_id2, par_sen2, &updates_l2);
+    if (feof(fi_par1) || feof(fi_par2)) {
+        fseek(fi_par1, 0, SEEK_SET);       // recycle parallel sentences
+        fseek(fi_par2, 0, SEEK_SET);
+    }
+    xling_balancer = (lang_updates[0] + lang_updates[1]) / 
+      (real)(updates_l1 + updates_l2);
+    // 'vanilla' BOW BilBOWA
+    //BilBOWAUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
+    //    xling_balancer, deltas, syn0_e, syn0_f);
+    BilBOWAPlusPlusUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
+        xling_balancer, deltas, syn0_e, syn0_f, normalizations);
+  } // while
+  free(normalizations);
   fclose(fi_par1);
   fclose(fi_par2);
   pthread_exit(NULL);
@@ -472,7 +534,7 @@ void *BilbowaUpdateThread(void *id) {
 /* Thread for performing the cross-lingual learning (L2 loss)
 void *BilbowaUpdateThread(void *id) {
     int par_sen_len1, par_sen_len2, lang_id1 = (int)id, lang_id2 = (int)id + 1;
-    long long par_sen1[MAX_SENTENCE_LENGTH], par_sen2[MAX_SENTENCE_LENGTH];
+    long long par_sen1[MAX_SEN_LEN], par_sen2[MAX_SEN_LEN];
     int a, c, d, offset;
     real *syn0_e = syn0s[lang_id1], *syn0_f = syn0s[lang_id2];
     real xling_delta[layer1_size], step;
@@ -559,9 +621,10 @@ void SaveModel(int lang_id, char *name) {
 
 /* Monolingual training thread */ 
 void *TrainModelThread(void *id) {
-  long long a, b, d, word, last_word, sentence_length = 0, sentence_position = 0;
+  long long a, b, d, word, last_word, sentence_length = 0,
+       sentence_position = 0;
   long long word_count = 0, last_word_count = 0, all_train_words = 0, epoch=0;
-  long long mono_sen[MAX_SENTENCE_LENGTH + 1];
+  long long mono_sen[MAX_SEN_LEN + 1];
   long long l1, l2, c, target, label;
   int lang_id = (int)id;       // TODO: Fix this
   char *train_file = mono_train_files[lang_id];
@@ -594,20 +657,23 @@ void *TrainModelThread(void *id) {
       last_word_count = word_count;
       if ((debug_mode > 1)) {
         now=clock();
-        printf("%cAlpha: %f  Progress: %.2f%%  (epoch %lld) Updates (L1: %lld, L2: %lld) Words/sec: %.2fk  ", 
+        printf("%cAlpha: %f  Progress: %.2f%%  (epoch %lld) Updates (L1: %lld,"
+            "L2: %lld) Words/sec: %.2fk  ", 
          13, 
          alpha,
          word_count_actual / (real)(all_train_words + 1) * 100,
-		 epoch,
+		     epoch,
          lang_updates[0],
          lang_updates[1],
-         word_count_actual / ((real)(now - start + 1) / (real)CLOCKS_PER_SEC * 1000));
+         word_count_actual / ((real)(now - start + 1) / 
+           (real)CLOCKS_PER_SEC * 1000));
         fflush(stdout);
-      }`
+      }
       if (!adagrad) {
-		alpha = starting_alpha * (1 - word_count_actual / (real)(all_train_words + 1));
+		    alpha = starting_alpha * (1 - word_count_actual / 
+            (real)(all_train_words + 1));
       	if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
-	  }
+	    }
     }
     if (sentence_length == 0) {
       sentence_length = ReadSent(fi, lang_id, mono_sen, &word_count);

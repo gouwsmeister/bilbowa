@@ -52,6 +52,7 @@ long long vocab_max_size = 1000, vocab_sizes[NUM_LANG], layer1_size = 40;
 long long train_words[NUM_LANG], word_count_actual, file_sizes[NUM_LANG];
 long long lang_updates[NUM_LANG], dump_every=0, dump_iters[NUM_LANG];
 unsigned long long next_random = 0;
+int UNIFORM_ALIGN = 1, MONO_SAMPLE = 1, PAR_SAMPLE = 1;
 real alpha = 0.025, starting_alpha, sample = 0, adagrad = 1;
 real *syn0s[NUM_LANG], *syn1s[NUM_LANG], *syn1negs[NUM_LANG], 
 	 *syn0grads[NUM_LANG], *syn1negGrads[NUM_LANG], *expTable;
@@ -61,7 +62,7 @@ const int table_size = 1e8;     // const across languages
 int *tables[NUM_LANG];
 int negative = 15, MONO_DONE_TRAINING = 0;
 long long NUM_EPOCHS=1, EARLY_STOP = 0, max_train_words;
-real *delta_pos, XLING_LAMBDA = 0.1, MARGIN = 0;
+real *delta_pos, XLING_LAMBDA = 1;
 
 void InitUnigramTable(int lang_id) {
   int a, i;
@@ -69,7 +70,7 @@ void InitUnigramTable(int lang_id) {
   int *table;
   struct vocab_word *vocab = vocabs[lang_id];
   real d1, power = 0.75;
-  table = tables[lang_id] = (int *)malloc(table_size * sizeof(int));
+  table = tables[lang_id] = malloc(table_size * sizeof(int));
   for (a = 0; a < vocab_size; a++) train_words_pow += pow(vocab[a].cn, power);
   i = 0;
   d1 = pow(vocab[i].cn, power) / (real)train_words_pow;
@@ -145,7 +146,7 @@ int AddWordToVocab(int lang_id, char *word) {
   int *vocab_hash = vocab_hashes[lang_id];			// array of *ints
   
   if (length > MAX_STRING) length = MAX_STRING;
-  vocab[vocab_sizes[lang_id]].word = (char *)calloc(length, sizeof(char));
+  vocab[vocab_sizes[lang_id]].word = calloc(length, sizeof(char));
   strcpy(vocab[vocab_sizes[lang_id]].word, word);
   vocab[vocab_sizes[lang_id]].cn = 0;
   vocab_sizes[lang_id]++;
@@ -345,7 +346,8 @@ void InitNet(int lang_id) {
 /* Read a sentence into *sen using vocabulary for language lang_id
  * Store processed words in *word_count, returns (potentially subsampled) 
  * length of sentence */
-int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count) {
+int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count,
+    char subsample) {
   long long word;
   int sentence_length = 0;
   struct vocab_word *vocab = vocabs[lang_id];
@@ -357,11 +359,11 @@ int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count) {
     if (word == 0) break;           // end-of-sentence
     // The subsampling randomly discards frequent words while keeping the 
     // ranking the same
-    if (sample > 0) {
-      real ran = (sqrt(vocab[word].cn / (sample * train_words[lang_id])) + 1) * 
+    if (subsample && sample > 0) {
+      real thresh = (sqrt(vocab[word].cn / (sample * train_words[lang_id])) + 1) * 
         (sample * train_words[lang_id]) / vocab[word].cn;
       next_random = next_random * (unsigned long long)25214903917 + 11;
-      if (ran < (next_random & 0xFFFF) / (real)65536) continue;
+      if (thresh > (next_random & 0xFFFF) / (real)65536) continue;
     }
     sen[sentence_length] = word;
     sentence_length++;
@@ -373,13 +375,12 @@ int ReadSent(FILE *fi, int lang_id, long long *sen, long long *word_count) {
 void UpdateEmbeddings(real *embeddings, real *grads, int offset, 
 					  int num_updates, real *deltas, real weight) {
   int a;
-  // TODO: Fudge factor should be small, ~1e-6
-  real step, fudge_factor = 1e-6;
+  real step, epsilon = 1e-6;
   for (a = 0; a < num_updates; a++) {
     if (adagrad) {
       // Use Adagrad for automatic learning rate selection
       grads[offset + a] += (deltas[a] * deltas[a]);
-      step = alpha * deltas[a] / (fudge_factor + sqrt(grads[offset + a]));
+      step = (alpha / fmax(epsilon, sqrt(grads[offset + a]))) * deltas[a];
     } else {
       // Regular SGD
       step = alpha * deltas[a];
@@ -417,7 +418,7 @@ void UpdateEnFrSquaredError(int en_sen_len, int fr_sen_len,
   }
 }
 
-real fpropSent(int len, long long *sen, real *deltas, real *syn, real sign) {
+real FpropSent(int len, long long *sen, real *deltas, real *syn, real sign) {
   real sumSquares = 0;
   long long c, d, offset;
   for (d = 0; d < len; d++) {
@@ -430,44 +431,105 @@ real fpropSent(int len, long long *sen, real *deltas, real *syn, real sign) {
   return sqrt(sumSquares);
 }
 
+real DiagonalAlignmentNormalizer(int i, int m, int n){
+  int j, sum = 0;
+  for (j = 0; j < n; j++)
+    sum += exp(-fabs(i/(real)m - j/(real)n));
+  return sum;
+}
+
+void BilBOWACombinedUpdate(int par_sen_len1, int par_sen_len2,
+    long long *par_sen1, long long *par_sen2, real xling_weight,
+    real *deltas, real *syn0_e, real *syn0_f, real *diag_Z) { 
+  int i, j;
+  real align_weight, normalizer, grad_norm; //, norm_sum = 0;
+  // TODO: This lazily caches the normalization weights, but uses way too
+  // much memory as we're very unlikely to see all combinations of
+  // MAX_SEN_LEN * MAX_SEN_LEN combinations of sentence lengths..
+  // Better solution to add Z_ij's into hash table indexed on (i,j)
+  for (i = 0; i < par_sen_len1; i++) {
+    // Note: ROW-dependent (FROM en TO fr) normalizer
+    normalizer = diag_Z[i * MAX_SEN_LEN + par_sen_len2];
+    if (normalizer == 0) { 
+      if (UNIFORM_ALIGN) normalizer = (real)par_sen_len2;
+      else normalizer = DiagonalAlignmentNormalizer(i, par_sen_len1, 
+        par_sen_len2);
+      // cache this result
+      diag_Z[i * MAX_SEN_LEN + par_sen_len2] = normalizer;
+    }
+    for (j = 0; j < par_sen_len2; j++) {
+      if (sample > 0) {
+        long long count = vocabs[1][par_sen2[j]].cn;
+        real thresh = (sqrt(count / (sample * train_words[1])) + 1) * 
+          (sample * train_words[1]) / count;
+        next_random = next_random * (unsigned long long)25214903917 + 11;
+        if (thresh > (next_random & 0xFFFF) / (real)65536) continue;
+      }
+      // Clear deltas
+      //for (a = 0; a < layer1_size; a++) deltas[a] = 0;
+      memset(deltas, 0, sizeof(real) * layer1_size);
+      // fprop
+      FpropSent(1, &par_sen1[i], deltas, syn0_e, +1);
+      grad_norm = FpropSent(1, &par_sen2[j], deltas, syn0_f, -1);
+      // TODO: Normalize this weight
+      if (UNIFORM_ALIGN) align_weight = 1.0 / normalizer;
+      else { 
+        align_weight = exp(-fabs(i/(real)par_sen_len1 - j/(real)par_sen_len2))
+          / normalizer;
+      }
+      //printf("BilBOWA ||grad|| = %.4f\txling_weight = %.4f\n", 
+      //  XLING_LAMBDA * xling_weight * align_weight * grad_norm, xling_weight);
+      //norm_sum += align_weight;
+      //printf("|%.4f|", align_weight);
+      UpdateEnFrSquaredError(1, 1, &par_sen1[i], &par_sen2[j], deltas,
+          syn0_e, syn0_f, XLING_LAMBDA * xling_weight * align_weight);
+    }
+    //printf("\n");
+  }
+  //printf("normalizer = %.2f / norm_sum = %.2f\n", normalizer, norm_sum);
+}
+
+
 /* BilBOWA++ Update (naive diagonal alignment model):
  * TODO: More here.
  * */
 void BilBOWAPlusPlusUpdate(int par_sen_len1, int par_sen_len2,
     long long *par_sen1, long long *par_sen2, real xling_weight,
     real *deltas, real *syn0_e, real *syn0_f, real *diag_Z) { 
-  int a, i, j;
-  real align_weight, normalizer;
-  //if (par_sen_len1 > sen_max || par_sen_len2 > sen_max) {
-  //  printf("ERROR: sentence length > MAX_SEN_LEN!\n");
-  //  exit(1);
-  //}
-  // This lazily caches the normalization weights, but uses way too
+  int i, j;
+  real align_weight, normalizer; //, norm_sum = 0;
+  // TODO: This lazily caches the normalization weights, but uses way too
   // much memory as we're very unlikely to see all combinations of
-  // MAX_SEN_LEN * MAX_SEN_LEN combinations sentence 
-  // lengths..
-  if (diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2] == 0) normalizer = 1.0;
-  else normalizer = diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2];
+  // MAX_SEN_LEN * MAX_SEN_LEN combinations of sentence lengths..
+  // Better solution to add Z_ij's into hash table indexed on (i,j)
+  normalizer = diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2];
+  if (normalizer == 0) { 
+    // FIXME
+    normalizer = DiagonalAlignmentNormalizer(999999, par_sen_len1, par_sen_len2);
+    // cache this result
+    diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2] = normalizer;
+  }
   for (i = 0; i < par_sen_len1; i++) {
     for (j = 0; j < par_sen_len2; j++) {
       // TODO: Add subsampling based on the PAIR of words'
       // frequencies.
       // Clear deltas
-      for (a = 0; a < layer1_size; a++) deltas[a] = 0; // faster?
-      //memset(deltas, 0, sizeof(real) * layer1_size);
+      //for (a = 0; a < layer1_size; a++) deltas[a] = 0;
+      memset(deltas, 0, sizeof(real) * layer1_size);
       // fprop
-      fpropSent(1, &par_sen1[i], deltas, syn0_e, +1);
-      fpropSent(1, &par_sen2[j], deltas, syn0_f, -1);
+      FpropSent(1, &par_sen1[i], deltas, syn0_e, +1);
+      FpropSent(1, &par_sen2[j], deltas, syn0_f, -1);
       // TODO: Normalize this weight
       align_weight = exp(-fabs(i/(real)par_sen_len1 - j/(real)par_sen_len2)) / 
         normalizer;
-      if (normalizer == 1.0) { // cache this result
-        diag_Z[par_sen_len1 * MAX_SEN_LEN + par_sen_len2] += align_weight;
-      }
+      //norm_sum += align_weight;
+      //printf("|%.4f|", align_weight);
       UpdateEnFrSquaredError(1, 1, &par_sen1[i], &par_sen2[j], deltas,
           syn0_e, syn0_f, XLING_LAMBDA * xling_weight * align_weight);
     }
-  } 
+    //printf("\n");
+  }
+  //printf("normalizer = %.2f / norm_sum = %.2f\n", normalizer, norm_sum);
 }
 
 
@@ -482,8 +544,8 @@ void BilBOWAUpdate(int par_sen_len1, int par_sen_len2,
   for (a = 0; a < layer1_size; a++) deltas[a] = 0;
   // ACCUMULATE L2 LOSS DELTA
   // TODO: Use syn0 / syn1neg?
-  fpropSent(par_sen_len1, par_sen1, deltas, syn0_e, +1); 
-  fpropSent(par_sen_len2, par_sen2, deltas, syn0_f, -1);
+  FpropSent(par_sen_len1, par_sen1, deltas, syn0_e, +1); 
+  FpropSent(par_sen_len2, par_sen2, deltas, syn0_f, -1);
   // BPROP
   // TODO: Enable > 2 languages
   UpdateEnFrSquaredError(par_sen_len1, par_sen_len2, 
@@ -498,20 +560,21 @@ void *BilbowaUpdateThread(void *id) {
   lang_id1 = (int)id, lang_id2 = (int)id + 1;
   long long par_sen1[MAX_SEN_LEN], 
             par_sen2[MAX_SEN_LEN],
-            updates_l1 = 0, updates_l2 = 0;
+            updates_l1 = 1, updates_l2 = 1;
   real *syn0_e = syn0s[lang_id1], *syn0_f = syn0s[lang_id2];
   real deltas[layer1_size], xling_balancer,
        *normalizations;   //[MAX_SEN_LEN * MAX_SEN_LEN] = {0.0};
   FILE *fi_par1, *fi_par2;    
-  normalizations = calloc(MAX_SEN_LEN * MAX_SEN_LEN, 
-      sizeof(real));
+  normalizations = calloc(MAX_SEN_LEN * MAX_SEN_LEN, sizeof(real));
   fi_par1 = fopen(par_train_files[lang_id1], "rb");   // en
   fi_par2 = fopen(par_train_files[lang_id2], "rb");   // fr 
 
-  // Continue training while skipgrams are still training
+  // Continue training while CBOW/skipgrams are still training
+  // TODO: Handle multiple threads
   while (MONO_DONE_TRAINING < NUM_LANG) {
-    par_sen_len1 = ReadSent(fi_par1, lang_id1, par_sen1, &updates_l1);
-    par_sen_len2 = ReadSent(fi_par2, lang_id2, par_sen2, &updates_l2);
+    // read without subsampling
+    par_sen_len1 = ReadSent(fi_par1, lang_id1, par_sen1, NULL, 1);
+    par_sen_len2 = ReadSent(fi_par2, lang_id2, par_sen2, NULL, 1);
     if (feof(fi_par1) || feof(fi_par2)) {
         fseek(fi_par1, 0, SEEK_SET);       // recycle parallel sentences
         fseek(fi_par2, 0, SEEK_SET);
@@ -519,17 +582,30 @@ void *BilbowaUpdateThread(void *id) {
     xling_balancer = (lang_updates[0] + lang_updates[1]) / 
       (real)(updates_l1 + updates_l2);
     // 'vanilla' BOW BilBOWA
-    //BilBOWAUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
-    //    xling_balancer, deltas, syn0_e, syn0_f);
-    BilBOWAPlusPlusUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
+    if (UNIFORM_ALIGN){
+      // note that this is O(|e| + |f|)
+      BilBOWAUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
+          xling_balancer, deltas, syn0_e, syn0_f);
+      //updates_l1 += par_sen_len1;
+      //updates_l2 += par_sen_len2;
+    } else {
+      // note that this is O(|e|*|f|)
+    /*  BilBOWAPlusPlusUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
         xling_balancer, deltas, syn0_e, syn0_f, normalizations);
+      updates_l1 += par_sen_len1 * par_sen_len2;
+      updates_l2 += par_sen_len1 * par_sen_len2;
+    } */
+      BilBOWACombinedUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
+        xling_balancer, deltas, syn0_e, syn0_f, normalizations);
+    }
+    updates_l1 += par_sen_len1; // * par_sen_len2;
+    updates_l2 += par_sen_len1; // * par_sen_len2;
   } // while
   free(normalizations);
   fclose(fi_par1);
   fclose(fi_par2);
   pthread_exit(NULL);
 }
-
 
 /* Thread for performing the cross-lingual learning (L2 loss)
 void *BilbowaUpdateThread(void *id) {
@@ -633,10 +709,10 @@ void *TrainModelThread(void *id) {
   //unsigned long long next_random = (long long)id;
   real f, g;
   clock_t now;
-  real *neu1 = (real *)calloc(layer1_size, sizeof(real));
-  real *neu1e = (real *)calloc(layer1_size, sizeof(real));
+  real *neu1 = calloc(layer1_size, sizeof(real));
+  real *neu1e = calloc(layer1_size, sizeof(real));
   real *syn1neg = syn1negs[lang_id];
-  real *syn1negDelta = (real *)calloc(layer1_size, sizeof(real));
+  real *syn1negDelta = calloc(layer1_size, sizeof(real));
   real *syn0 = syn0s[lang_id];
   FILE *fi = fopen(train_file, "rb");
 
@@ -676,7 +752,7 @@ void *TrainModelThread(void *id) {
 	    }
     }
     if (sentence_length == 0) {
-      sentence_length = ReadSent(fi, lang_id, mono_sen, &word_count);
+      sentence_length = ReadSent(fi, lang_id, mono_sen, &word_count, 1);
       sentence_position = 0;
     }
     // TODO: take num_threads/EPOCHS into account below
@@ -707,7 +783,7 @@ void *TrainModelThread(void *id) {
     b = next_random % window;
     // CBOW ARCHITECTURE: NEGATIVE SAMPLING
     if (cbow) {
-    for (d = 0; d < negative + 1; d++) {
+      for (d = 0; d < negative + 1; d++) {
         if (d == 0) {
           target = word;
           label = 1;
@@ -721,23 +797,30 @@ void *TrainModelThread(void *id) {
         l2 = target * layer1_size;
         f = 0;
         for (c = 0; c < layer1_size; c++) f += neu1[c] * syn1neg[c + l2];
-        if (f > MAX_EXP) g = (label - 1) * alpha;
-        else if (f < -MAX_EXP) g = (label - 0) * alpha;
-        else g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
+        // alpha used to be multiplied into g below, but gets applied in 
+        // UpdateEmbeddings() now
+        if (f > MAX_EXP) g = (label - 1);
+        else if (f < -MAX_EXP) g = (label - 0);
+        else g = (label - expTable[(int)((f + MAX_EXP) * 
+              (EXP_TABLE_SIZE / MAX_EXP / 2))]);
         for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
         //for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
-		for (c = 0; c < layer1_size; c++) syn1negDelta[c] = neu1[c] * g;
-		UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, syn1negDelta, +1);
+		    for (c = 0; c < layer1_size; c++) syn1negDelta[c] = neu1[c] * g;
+    		UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, 
+            syn1negDelta, +1);
       }
       // hidden -> in
-      for (a = b; a < window * 2 + 1 - b; a++) if (a != window) {
-        c = sentence_position - window + a;
-        if (c < 0) continue;
-        if (c >= sentence_length) continue;
-        last_word = mono_sen[c];
-        if (last_word == -1) continue;
-        //for (c = 0; c < layer1_size; c++) syn0[c + last_word * layer1_size] += neu1e[c];
-		UpdateEmbeddings(syn0, syn0grads[lang_id], last_word*layer1_size, layer1_size, neu1e, +1);
+      for (a = b; a < window * 2 + 1 - b; a++) 
+        if (a != window) {
+          c = sentence_position - window + a;
+          if (c < 0) continue;
+          if (c >= sentence_length) continue;
+          last_word = mono_sen[c];
+          if (last_word == -1) continue;
+          //for (c = 0; c < layer1_size; c++) 
+          //syn0[c + last_word * layer1_size] += neu1e[c];
+          UpdateEmbeddings(syn0, syn0grads[lang_id], last_word*layer1_size, 
+              layer1_size, neu1e, +1);
       }
     } else {        
       // SKIPGRAM ARCHITECTURE: NEGATIVE SAMPLING
@@ -764,18 +847,25 @@ void *TrainModelThread(void *id) {
             }
             l2 = target * layer1_size;
             f = 0;
-            for (c = 0; c < layer1_size; c++) f += syn0[c + l1] * syn1neg[c + l2];
-            if (f > MAX_EXP) g = (label - 1) * alpha;
-            else if (f < -MAX_EXP) g = (label - 0) * alpha;
-            else g = (label - expTable[(int)((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]) * alpha;
+            for (c = 0; c < layer1_size; c++) 
+              f += syn0[c + l1] * syn1neg[c + l2];
+            // We multiply with the learning rate in UpdateEmbeddings()
+            if (f > MAX_EXP) g = (label - 1);
+            else if (f < -MAX_EXP) g = (label - 0);
+            else g = (label - expTable[(int)((f + MAX_EXP) *
+                  (EXP_TABLE_SIZE / MAX_EXP / 2))]);
             for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
-            //for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * syn0[c + l1];
-     		for (c = 0; c < layer1_size; c++) syn1negDelta[c] = g * syn0[c + l1];
-			UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, syn1negDelta, +1);
+            //for (c = 0; c < layer1_size; c++) 
+            //syn1neg[c + l2] += g * syn0[c + l1];
+     		    for (c = 0; c < layer1_size; c++) 
+              syn1negDelta[c] = g * syn0[c + l1];
+		        UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, 
+                syn1negDelta, +1);
           }
           // Learn weights input -> hidden
           //for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
-		  UpdateEmbeddings(syn0, syn0grads[lang_id], l1, layer1_size, neu1e, +1);
+		      UpdateEmbeddings(syn0, syn0grads[lang_id], l1, 
+              layer1_size, neu1e, +1);
         }
       }   // for
     }   // skipgram
@@ -804,10 +894,10 @@ void *TrainModelThread(void *id) {
 void TrainModel() {
   long a;
   int lang_id, i;
-  pthread_t *pt = (pthread_t *)malloc((NUM_LANG + 1) * sizeof(pthread_t));
+  pthread_t *pt = malloc((NUM_LANG + 1) * sizeof(pthread_t));
 
   starting_alpha = alpha;
-  expTable = (real *)malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
+  expTable = malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
   for (i = 0; i < EXP_TABLE_SIZE; i++) {
     // Precompute the exp() table
     expTable[i] = exp((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP);
@@ -817,8 +907,8 @@ void TrainModel() {
   //TODO: CHANGE THIS FOR MORE THAN 2 LANGUAGES
   max_train_words = 0;
   for (lang_id = 0; lang_id < NUM_LANG; lang_id++) {
-    vocabs[lang_id] = (struct vocab_word *)calloc(vocab_max_size, sizeof(struct vocab_word));
-    vocab_hashes[lang_id] = (int *)calloc(vocab_hash_size, sizeof(int));
+    vocabs[lang_id] = calloc(vocab_max_size, sizeof(struct vocab_word));
+    vocab_hashes[lang_id] = calloc(vocab_hash_size, sizeof(int));
     if (read_vocab_files[lang_id][0] != 0) {
       fprintf(stderr, "Reading vocab\n");
       ReadVocab(lang_id);
@@ -871,11 +961,13 @@ int ArgPos(char *str, int argc, char **argv) {
 int main(int argc, char **argv) {
   int i, lang_id;
   if (argc == 1) {
-    printf("BILINGUAL BOW w/out Alignments (BilBOWA) WORD VECTOR estimation toolkit v 0.1b\n\n");
+    printf("BILINGUAL BOW w/out Alignments (BilBOWA) WORD VECTOR estimation"
+        "toolkit v 0.1b\n\n");
     printf("Options:\n");
     printf("Parameters for training:\n");
     printf("\t-par-trainN <file>\n");
-    printf("\t\tUse parallel text data for language N from <file> to train the model\n");
+    printf("\t\tUse parallel text data for language N from <file> to train "
+        "the model\n");
     printf("\t-outputN <file>\n");
     printf("\t\tUse <file> to save the resulting word vectors for language N\n");
     printf("\t-size <int>\n");
@@ -883,69 +975,99 @@ int main(int argc, char **argv) {
     printf("\t-window <int>\n");
     printf("\t\tSet max skip length between words; default is 5\n");
     printf("\t-sample <float>\n");
-    printf("\t\tSet threshold for occurrence of words. Those that appear with higher frequency");
-    printf(" in the training data will be randomly down-sampled; default is 0 (off), useful value is 1e-5\n");
+    printf("\t\tSet threshold for occurrence of words. Those that appear with"
+        " higher frequency");
+    printf(" in the training data will be randomly down-sampled; default is "
+        "0 (off), useful value is 1e-5\n");
     printf("\t-negative <int>\n");
-    printf("\t\tNumber of negative examples; default is 0, common values are 5 - 10 (0 = not used)\n");
+    printf("\t\tNumber of negative examples; default is 0, common values are"
+        " 5 - 10 (0 = not used)\n");
     printf("\t-threads <int>\n");
     printf("\t\tUse <int> threads (default 1)\n");
     printf("\t-min-count <int>\n");
-    printf("\t\tThis will discard words that appear less than <int> times; default is 5\n");
+    printf("\t\tThis will discard words that appear less than <int> times; "
+        "default is 5\n");
     printf("\t-alpha <float>\n");
     printf("\t\tSet the starting learning rate; default is 0.025\n");
-    printf("\t-classes <int>\n");
-    printf("\t\tOutput word classes rather than word vectors; default number of classes is 0 (vectors are written)\n");
     printf("\t-debug <int>\n");
-    printf("\t\tSet the debug mode (default = 2 = more info during training)\n");
+    printf("\t\tSet the debug mode (default = 2, more info during training)\n");
     printf("\t-binary <int>\n");
-    printf("\t\tSave the resulting vectors in binary moded; default is 0 (off)\n");
+    printf("\t\tSave the resulting vectors in binary moded; default is 0 "
+        "(off)\n");
     printf("\t-save-vocabN <file>\n");
     printf("\t\tThe vocabulary for language N will be saved to <file>\n");
     printf("\t-read-vocabN <file>\n");
-    printf("\t\tThe vocabulary for language N will be read from <file>, not constructed from the training data\n");
+    printf("\t\tThe vocabulary for language N will be read from <file>, not "
+        "constructed from the training data\n");
    printf("\nExamples:\n");
-    printf("./word2vec -train data.txt -output vec.txt -debug 2 -size 200 -window 5 -sample 1e-4 -negative 5 -hs 0 -binary 0 -cbow 1\n\n");
+    printf("./word2vec -train data.txt -output vec.txt -debug 2 -size 200 "
+        "-window 5 -sample 1e-4 -negative 5 -hs 0 -binary 0 -cbow 1\n\n");
     return 0;
   }
   for (lang_id = 0; lang_id < NUM_LANG; lang_id++) {
-    mono_train_files[lang_id] = (char *)calloc(MAX_STRING, sizeof(char));
-    par_train_files[lang_id] = (char *)calloc(MAX_STRING, sizeof(char));
-    output_files[lang_id] = (char *)calloc(MAX_STRING, sizeof(char));
-    save_vocab_files[lang_id] = (char *)calloc(MAX_STRING, sizeof(char));
-    read_vocab_files[lang_id] = (char *)calloc(MAX_STRING, sizeof(char));
+    mono_train_files[lang_id] = calloc(MAX_STRING, sizeof(char));
+    par_train_files[lang_id] = calloc(MAX_STRING, sizeof(char));
+    output_files[lang_id] = calloc(MAX_STRING, sizeof(char));
+    save_vocab_files[lang_id] = calloc(MAX_STRING, sizeof(char));
+    read_vocab_files[lang_id] = calloc(MAX_STRING, sizeof(char));
     lang_updates[lang_id] = 0;
-	dump_iters[lang_id] = 0;
+	  dump_iters[lang_id] = 0;
   }
-  if ((i = ArgPos((char *)"-size", argc, argv)) > 0) layer1_size = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-mono-train1", argc, argv)) > 0) strcpy(mono_train_files[0], argv[i + 1]);
-  if ((i = ArgPos((char *)"-mono-train2", argc, argv)) > 0) strcpy(mono_train_files[1], argv[i + 1]);
-  if ((i = ArgPos((char *)"-par-train1", argc, argv)) > 0) strcpy(par_train_files[0], argv[i + 1]);
-  if ((i = ArgPos((char *)"-par-train2", argc, argv)) > 0) strcpy(par_train_files[1], argv[i + 1]);
+  if ((i = ArgPos((char *)"-size", argc, argv)) > 0) 
+    layer1_size = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-mono-train1", argc, argv)) > 0) 
+    strcpy(mono_train_files[0], argv[i + 1]);
+  if ((i = ArgPos((char *)"-mono-train2", argc, argv)) > 0) 
+    strcpy(mono_train_files[1], argv[i + 1]);
+  if ((i = ArgPos((char *)"-par-train1", argc, argv)) > 0) 
+    strcpy(par_train_files[0], argv[i + 1]);
+  if ((i = ArgPos((char *)"-par-train2", argc, argv)) > 0) 
+    strcpy(par_train_files[1], argv[i + 1]);
   //TODO: make this support more than one language pair
-  if ((i = ArgPos((char *)"-noise-train", argc, argv)) > 0) strcpy(noise_train_files[0], argv[i + 1]);
-  if ((i = ArgPos((char *)"-save-vocab1", argc, argv)) > 0) strcpy(save_vocab_files[0], argv[i + 1]);
-  if ((i = ArgPos((char *)"-read-vocab1", argc, argv)) > 0) strcpy(read_vocab_files[0], argv[i + 1]);
-  if ((i = ArgPos((char *)"-save-vocab2", argc, argv)) > 0) strcpy(save_vocab_files[1], argv[i + 1]);
-  if ((i = ArgPos((char *)"-read-vocab2", argc, argv)) > 0) strcpy(read_vocab_files[1], argv[i + 1]);
+  if ((i = ArgPos((char *)"-noise-train", argc, argv)) > 0) 
+    strcpy(noise_train_files[0], argv[i + 1]);
+  if ((i = ArgPos((char *)"-save-vocab1", argc, argv)) > 0) 
+    strcpy(save_vocab_files[0], argv[i + 1]);
+  if ((i = ArgPos((char *)"-read-vocab1", argc, argv)) > 0) 
+    strcpy(read_vocab_files[0], argv[i + 1]);
+  if ((i = ArgPos((char *)"-save-vocab2", argc, argv)) > 0) 
+    strcpy(save_vocab_files[1], argv[i + 1]);
+  if ((i = ArgPos((char *)"-read-vocab2", argc, argv)) > 0) 
+    strcpy(read_vocab_files[1], argv[i + 1]);
   if ((i = ArgPos((char *)"-cbow", argc, argv)) > 0) cbow = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-debug", argc, argv)) > 0) debug_mode = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-binary", argc, argv)) > 0) binary = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-alpha", argc, argv)) > 0) alpha = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-margin", argc, argv)) > 0) MARGIN = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-output1", argc, argv)) > 0) strcpy(output_files[0], argv[i + 1]);
-  if ((i = ArgPos((char *)"-output2", argc, argv)) > 0) strcpy(output_files[1], argv[i + 1]);
-  if ((i = ArgPos((char *)"-window", argc, argv)) > 0) window = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-sample", argc, argv)) > 0) sample = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-negative", argc, argv)) > 0) negative = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-threads", argc, argv)) > 0) num_threads = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) min_count = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-early-stop", argc, argv)) > 0) EARLY_STOP = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-epochs", argc, argv)) > 0) NUM_EPOCHS = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-adagrad", argc, argv)) > 0) adagrad = atoi(argv[i + 1]);
-  if ((i = ArgPos((char *)"-xling-lambda", argc, argv)) > 0) XLING_LAMBDA = atof(argv[i + 1]);
-  if ((i = ArgPos((char *)"-dump-every", argc, argv)) > 0) dump_every = atoi(argv[i + 1]);
-  
-  if (MARGIN == 0) MARGIN = layer1_size;
+  if ((i = ArgPos((char *)"-debug", argc, argv)) > 0) 
+    debug_mode = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-binary", argc, argv)) > 0) 
+    binary = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-alpha", argc, argv)) > 0) 
+    alpha = atof(argv[i + 1]);
+  if ((i = ArgPos((char *)"-output1", argc, argv)) > 0) 
+    strcpy(output_files[0], argv[i + 1]);
+  if ((i = ArgPos((char *)"-output2", argc, argv)) > 0) 
+    strcpy(output_files[1], argv[i + 1]);
+  if ((i = ArgPos((char *)"-window", argc, argv)) > 0) 
+    window = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-sample", argc, argv)) > 0) 
+    sample = atof(argv[i + 1]);
+  if ((i = ArgPos((char *)"-negative", argc, argv)) > 0) 
+    negative = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-threads", argc, argv)) > 0) 
+    num_threads = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-min-count", argc, argv)) > 0) 
+    min_count = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-early-stop", argc, argv)) > 0) 
+    EARLY_STOP = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-epochs", argc, argv)) > 0) 
+    NUM_EPOCHS = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-adagrad", argc, argv)) > 0)
+    adagrad = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-xling-lambda", argc, argv)) > 0)
+    XLING_LAMBDA = atof(argv[i + 1]);
+  if ((i = ArgPos((char *)"-dump-every", argc, argv)) > 0) 
+    dump_every = atoi(argv[i + 1]);
+  if ((i = ArgPos((char *)"-uniform-align", argc, argv)) > 0) 
+    UNIFORM_ALIGN = atoi(argv[i + 1]);
+
   TrainModel();
   return 0;
 }

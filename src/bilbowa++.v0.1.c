@@ -27,11 +27,10 @@
 
 #define NUM_LANG 2
 #define CLIP_UPDATES 0.1                // biggest update per parameter per step
-#define NUM_TO_SAMPLE 100               // number of cross-lingual word-pairs to sample per sentence
+#define PAIRS_TO_SAMPLE 100             // number of cross-lingual word-pairs to sample per sentence
 
-const int vocab_hash_size = 30000000;  // Maximum 30 * 0.7 = 21M words in the vocabulary
-
-typedef float real;                    // Precision of float numbers
+const int vocab_hash_size = 30000000;   // Maximum 30 * 0.7 = 21M words in the vocabulary
+typedef float real;                     // Precision of float numbers
 
 struct vocab_word {
   long long cn;
@@ -531,7 +530,7 @@ void BilBOWAPlusPlusMCUpdate(int par_sen_len1, int par_sen_len2,
   BuildBilingCDF(ensample, par_sen1, 0, -1, par_sen_len1, -1);
   if (ALIGN_LAMBDA == 0)
     BuildBilingCDF(frsample, par_sen2, 1, -1, par_sen_len1, par_sen_len2); // doesn't change
-  while (pairs_updated < NUM_TO_SAMPLE) {
+  while (pairs_updated < PAIRS_TO_SAMPLE) {
     // SAMPLE en WORD
     thresh = rand() / (real)RAND_MAX;
     for (i = 0; i < par_sen_len1 && ensample[i] < thresh; i++);
@@ -626,6 +625,8 @@ void *BilbowaThread(void *id) {
     //  (real)(updates_l1 + updates_l2);
     xling_balancer = 1.0;
     if (!PLUSPLUS) {    // sentence-vector
+      // TODO: Move this out to BilBOWASentenceUpdate() or
+      // remove altogether
       /*
       BuildCDF(ensample, par_sen1, 0, par_sen_len1);
       BuildCDF(frsample, par_sen2, 1, par_sen_len2);
@@ -642,9 +643,9 @@ void *BilbowaThread(void *id) {
         //printf(" ||grad|| = %.4f \n", grad_norm);
         total_sampled++;
       }
+      BilBOWASentenceUpdate(total_sampled, total_sampled, sampled_sen1, sampled_sen2, 
+        xling_balancer, deltas, syn0_e, syn0_f);
       */
-      //BilBOWASentenceUpdate(total_sampled, total_sampled, sampled_sen1, sampled_sen2, 
-      //      xling_balancer, deltas, syn0_e, syn0_f);
       BilBOWASentenceUpdate(par_sen_len1, par_sen_len2, par_sen1, par_sen2, 
         xling_balancer, deltas, syn0_e, syn0_f);
     } else {

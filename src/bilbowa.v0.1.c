@@ -1,4 +1,4 @@
-//  Copyright 2013 Google Inc. All Rights Reserved.
+//  Copyright 2015 Google Inc. All Rights Reserved.
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
 //  you may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@
 #define EXP_TABLE_SIZE 1000
 #define MAX_EXP 6
 #define MAX_SEN_LEN 1000
-#define MAX_CODE_LENGTH 40
 
 #define NUM_LANG 2
 #define CLIP_UPDATES 0.1               // biggest update per parameter per step
@@ -55,7 +54,7 @@ unsigned long long next_random = 0;
 int learn_vocab_and_quit = 0, MONO_SAMPLE = 1, PAR_SAMPLE = 1, adagrad = 0;
 real alpha = 0.025, starting_alpha, sample = 0, bilbowa_grad = 0;
 real *syn0s[NUM_LANG], *syn1s[NUM_LANG], *syn1negs[NUM_LANG], 
-	 *syn0grads[NUM_LANG], *syn1negGrads[NUM_LANG], *expTable;
+   *syn0grads[NUM_LANG], *syn1negGrads[NUM_LANG], *expTable;
 clock_t start;
 
 const int table_size = 1e8;     // const across languages
@@ -144,7 +143,7 @@ int ReadWordIndex(FILE *fin, int lang_id) {
 int AddWordToVocab(int lang_id, char *word) {    
   unsigned int hash, length = strlen(word) + 1;
   struct vocab_word *vocab = vocabs[lang_id];
-  int *vocab_hash = vocab_hashes[lang_id];			// array of *ints
+  int *vocab_hash = vocab_hashes[lang_id];      // array of *ints
   
   if (length > MAX_STRING) length = MAX_STRING;
   vocab[vocab_sizes[lang_id]].word = calloc(length, sizeof(char));
@@ -256,8 +255,8 @@ void LearnVocabFromTrainFile(int lang_id) {
       vocab[a].cn = 1;
     } else vocab[i].cn++;
     if (vocab_sizes[lang_id] > vocab_hash_size * 0.7) {
-	  ReduceVocab(lang_id);     
-	}
+    ReduceVocab(lang_id);     
+  }
   }
   fprintf(stderr, "pre SortVocab\n");
   SortVocab(lang_id);
@@ -330,23 +329,23 @@ void InitNet(int lang_id) {
   if (syn1neg == NULL) {printf("Memory allocation failed\n"); exit(1);}
   else syn1negs[lang_id] = syn1neg;
   if (adagrad) {
-	  a = posix_memalign((void **)&syn0grad, 128, (long long)vocab_size * 
+    a = posix_memalign((void **)&syn0grad, 128, (long long)vocab_size * 
         layer1_size * sizeof(real));
-  	if (syn0grad == NULL) {printf("Memory allocation failed\n"); exit(1);}
-  	else syn0grads[lang_id] = syn0grad;
-  	a = posix_memalign((void **)&syn1negGrad, 128, (long long)vocab_size * 
+    if (syn0grad == NULL) {printf("Memory allocation failed\n"); exit(1);}
+    else syn0grads[lang_id] = syn0grad;
+    a = posix_memalign((void **)&syn1negGrad, 128, (long long)vocab_size * 
         layer1_size * sizeof(real));
-  	if (syn1negGrad == NULL) {printf("Memory allocation failed\n"); exit(1);}
-	else syn1negGrads[lang_id] = syn1negGrad;
+    if (syn1negGrad == NULL) {printf("Memory allocation failed\n"); exit(1);}
+  else syn1negGrads[lang_id] = syn1negGrad;
   }
   for (b = 0; b < layer1_size; b++) { 
     for (a = 0; a < vocab_size; a++) {
       syn1neg[a * layer1_size + b] = 0;
       syn0[a * layer1_size + b] = (rand() / (real)RAND_MAX - 0.5) / layer1_size;
-	  if (adagrad) {
-		syn0grad[a*layer1_size + b] = 0;
-	    syn1negGrad[a*layer1_size + b] = 0;
-	  }
+    if (adagrad) {
+    syn0grad[a*layer1_size + b] = 0;
+      syn1negGrad[a*layer1_size + b] = 0;
+    }
     }
   } 
 }
@@ -385,7 +384,7 @@ int ReadSent(FILE *fi, int lang_id, long long *sen, char subsample) {
 }
 
 void UpdateEmbeddings(real *embeddings, real *grads, int offset, 
-					  int num_updates, real *deltas, real weight) {
+            int num_updates, real *deltas, real weight) {
   int a;
   real step, epsilon = 1e-6;
   for (a = 0; a < num_updates; a++) {
@@ -405,7 +404,7 @@ void UpdateEmbeddings(real *embeddings, real *grads, int offset,
         if (step > CLIP_UPDATES) step = CLIP_UPDATES;
         if (step < -CLIP_UPDATES) step = -CLIP_UPDATES;
       }
-      embeddings[offset + a] += step;   
+      embeddings[offset + a] += step;
     }
 }
 
@@ -418,14 +417,14 @@ void UpdateEnFrSquaredError(int en_sen_len, int fr_sen_len,
   // d/den = +delta 
   for (d = 0; d < en_sen_len; d++) {
     offset = layer1_size * en_sen[d];
-	  // update in -d/den = -delta direction
-	  UpdateEmbeddings(syn0_e, syn0grads[0], offset, layer1_size, delta, -weight);
+    // update in -d/den = -delta direction
+    UpdateEmbeddings(syn0_e, syn0grads[0], offset, layer1_size, delta, -weight);
   }
   // d/df = -delta
   for (d = 0; d < fr_sen_len; d++) {
     offset = layer1_size * fr_sen[d];
-	  // update in -d/df = +delta direction
-	  UpdateEmbeddings(syn0_f, syn0grads[1], offset, layer1_size, delta, weight);
+    // update in -d/df = +delta direction
+    UpdateEmbeddings(syn0_f, syn0grads[1], offset, layer1_size, delta, weight);
   }
 }
 
@@ -437,7 +436,7 @@ real FpropSent(int len, long long *sen, real *deltas, real *syn, real sign) {
      for (c = 0; c < layer1_size; c++) {
        // We compute the MEAN sentence vector
        deltas[c] += sign * syn[offset + c] / (real)len;    
-       sumSquares += deltas[c] * deltas[c];
+       if (d == len - 1) sumSquares += deltas[c] * deltas[c];
      }
   }
   return sumSquares;
@@ -510,8 +509,6 @@ void *BilbowaThread(void *id) {
   //real threshold, ensample[MAX_SEN_LEN], frsample[MAX_SEN_LEN];
   FILE *fi_par1, *fi_par2;  
 
-  //printf("BilBOWA thread: *id==%d, lang_id1==%d, lang_id2==%d, thread_id==%d\n", 
-  //    (int)id, lang_id1, lang_id2, thread_id);
   fi_par1 = fopen(par_train_files[lang_id1], "rb");   // en
   fseek(fi_par1, 0, SEEK_END); 
   f1_size = ftell(fi_par1); 
@@ -634,7 +631,7 @@ void *MonoModelThread(void *id) {
          13, 
          alpha,
          word_count_actual / (real)(all_train_words + 1) * 100,
-		     epoch[0],
+         epoch[0],
          lang_updates[0] / (real)1000000,
          lang_updates[1] / (real)1000000,
          bilbowa_grad,
@@ -644,11 +641,11 @@ void *MonoModelThread(void *id) {
       }
       if (!adagrad) {
         if (word_count_actual < (all_train_words + 1)) {
-		      alpha = starting_alpha * 
+          alpha = starting_alpha * 
             (1.0 - word_count_actual / (real)(all_train_words + 1));
         } else alpha = starting_alpha * 0.0001;
-      	//if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
-	    }
+        //if (alpha < starting_alpha * 0.0001) alpha = starting_alpha * 0.0001;
+      }
     }
     if (sentence_length == 0) {
       sentence_length = ReadSent(fi, lang_id, mono_sen, 1);
@@ -666,13 +663,13 @@ void *MonoModelThread(void *id) {
       last_word_count = 0;
       sentence_length = 0;
       fseek(fi, file_sizes[lang_id] / (long long)num_threads * thread_id, SEEK_SET);
-	    continue;
+      continue;
     }
     if (EARLY_STOP) {
-	    if (word_count_actual > EARLY_STOP) {
+      if (word_count_actual > EARLY_STOP) {
         fprintf(stderr, "EARLY STOP point reached (thread %d)\n", (int)id);
         break;
-	  }
+    }
     }
     word = mono_sen[sentence_position];
     if (word == -1) continue;
@@ -703,8 +700,8 @@ void *MonoModelThread(void *id) {
               (EXP_TABLE_SIZE / MAX_EXP / 2))]);
         for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
         //for (c = 0; c < layer1_size; c++) syn1neg[c + l2] += g * neu1[c];
-		    for (c = 0; c < layer1_size; c++) syn1negDelta[c] = neu1[c] * g;
-    		UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, 
+        for (c = 0; c < layer1_size; c++) syn1negDelta[c] = neu1[c] * g;
+        UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, 
             syn1negDelta, +1);
       }
       // hidden -> in
@@ -755,27 +752,27 @@ void *MonoModelThread(void *id) {
             for (c = 0; c < layer1_size; c++) neu1e[c] += g * syn1neg[c + l2];
             //for (c = 0; c < layer1_size; c++) 
             //syn1neg[c + l2] += g * syn0[c + l1];
-     		    for (c = 0; c < layer1_size; c++) 
+            for (c = 0; c < layer1_size; c++) 
               syn1negDelta[c] = g * syn0[c + l1];
-		        UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, 
+            UpdateEmbeddings(syn1neg, syn1negGrads[lang_id], l2, layer1_size, 
                 syn1negDelta, +1);
           }
           // Learn weights input -> hidden
           //for (c = 0; c < layer1_size; c++) syn0[c + l1] += neu1e[c];
-		      UpdateEmbeddings(syn0, syn0grads[lang_id], l1, 
+          UpdateEmbeddings(syn0, syn0grads[lang_id], l1, 
               layer1_size, neu1e, +1);
         }
       }   // for
     }   // skipgram
     lang_updates[lang_id]++;
     sentence_position++;
-	  if (dump_every > 0) {
-	    if (lang_updates[lang_id] % dump_every == 0) {
-	  	  char save_name[MAX_STRING];
-	  	  sprintf(save_name, output_files[lang_id], dump_iters[lang_id]++);	
-	  	  SaveModel(lang_id, save_name);
-	    }
-	  }
+    if (dump_every > 0) {
+      if (lang_updates[lang_id] % dump_every == 0) {
+        char save_name[MAX_STRING];
+        sprintf(save_name, output_files[lang_id], dump_iters[lang_id]++); 
+        SaveModel(lang_id, save_name);
+      }
+    }
     if (sentence_position >= sentence_length) {
       sentence_length = 0;
       continue;
@@ -798,9 +795,9 @@ void TrainModel() {
     // Precompute the exp() table
     expTable[i] = exp((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP);
     // Precompute sigmoid f(x) = x / (x + 1)
-    expTable[i] = expTable[i] / (expTable[i] + 1);                   
+    expTable[i] = expTable[i] / (expTable[i] + 1);
   }
-  //TODO: CHANGE THIS FOR MORE THAN 2 LANGUAGES
+  //TODO: Change this for more than two languages
   max_train_words = 0;
   for (lang_id = 0; lang_id < NUM_LANG; lang_id++) {
     vocabs[lang_id] = calloc(vocab_max_size, sizeof(struct vocab_word));
@@ -914,20 +911,12 @@ int main(int argc, char **argv) {
     printf("\t-dump-every N\n");
     printf("\t\tSave intermediate embeddings during training every N steps if N>0,"
         " else every epoch/N steps\n");
-    printf("\t-vanilla-align <int>\n");
-    printf("\t\tUse bag-of-words sentence model\n");
-    printf("\t-uniform-align <int>\n");
-    printf("\t\t1 - Uniform alignment model, 0 - diagonal alignment model\n");
-    printf("\t-align-lambda <float>\n");
-    printf("\t\tA higher weight increases preference for aligning words from paired"
-        " sentences along the diagonal\n");
-    printf("\t-lean-vocab-and-quit <int>\n");
+    printf("\t-learn-vocab-and-quit <int>\n");
     printf("\t\tLearn and save vocab only\n");
     printf("\nExamples:\n");
     printf("./bilbowa -mono-train1 endata.txt -mono-train2 frdata.txt -par-train1 "
        "enfr.en -par-train2 enfr.fr -output1 envec.txt -output2 frvec.txt -size 200"
-       " -window 5 -sample 1e-4 -negative 5 -binary 0 -adagrad 1 -xling-lambda 1 "
-       "-uniform-align 1\n\n");
+       " -window 5 -sample 1e-4 -negative 5 -binary 0 -adagrad 1 -xling-lambda 1\n\n");
     return 0;
   }
 
@@ -938,7 +927,7 @@ int main(int argc, char **argv) {
     save_vocab_files[lang_id] = calloc(MAX_STRING, sizeof(char));
     read_vocab_files[lang_id] = calloc(MAX_STRING, sizeof(char));
     lang_updates[lang_id] = 0;
-	  dump_iters[lang_id] = 0;
+    dump_iters[lang_id] = 0;
   }
   if ((i = ArgPos((char *)"-size", argc, argv)) > 0) 
     layer1_size = atoi(argv[i + 1]);

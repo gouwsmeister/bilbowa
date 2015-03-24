@@ -14,20 +14,31 @@ assert dimY1 == dimY2
 en_ext = '_'+sys.argv[3]
 fr_ext = '_'+sys.argv[4]
 MAX_EXTRACT = int(sys.argv[5])
-words, embs = [], []
+enwords, enembs = [], []
+frwords, frembs = [], []
 def extract(fin, words, embs, extension, MAX_EXTRACT):
     for i, line in enumerate(fin):
-        if i >= MAX_EXTRACT:
+        if MAX_EXTRACT > 0 and i >= MAX_EXTRACT:
             break
         splits = line.split()
         word, embedding = splits[0], splits[1:]
         words.append(word + extension)
         embs.append(embedding)
+    if (MAX_EXTRACT < 0):
+        # take first and last MAX_EXTRACT embs
+        print "Clipping to first and last ", abs(MAX_EXTRACT)
+        #embs = embs[0:abs(MAX_EXTRACT)] + embs[MAX_EXTRACT:]
+        #words = words[0:abs(MAX_EXTRACT)] + words[MAX_EXTRACT:]
+        del embs[abs(MAX_EXTRACT):MAX_EXTRACT]  #inplace
+        del words[abs(MAX_EXTRACT):MAX_EXTRACT]
 
-extract(fin1, words, embs, en_ext, MAX_EXTRACT)
-extract(fin2, words, embs, fr_ext, MAX_EXTRACT)
+extract(fin1, enwords, enembs, en_ext, MAX_EXTRACT)
+extract(fin2, frwords, frembs, fr_ext, MAX_EXTRACT)
+embs = enembs + frembs
+words = enwords + frwords
 emb_mat = np.asarray(embs, dtype='float32')
 print "Extracted %d words, constructed embeddings matrix with shape %s" % (len(words), emb_mat.shape)
+print "Average embedding norms: %f" % (np.sqrt((emb_mat**2).sum(axis=1)).mean(),)
 # save as pickle
 cPickle.dump([words, emb_mat], open(sys.argv[6], 'wb'))
 fin1.close()

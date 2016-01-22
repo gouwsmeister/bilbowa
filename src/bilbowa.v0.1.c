@@ -836,7 +836,7 @@ void TrainModel() {
   }
   for (a = 0; a < (NUM_LANG - 1) * num_threads; a++) {
     if (debug_mode > 2) printf("Spawning parallel thread %ld\n", a);
-    pthread_create(&pt[a], NULL, BilbowaThread, (void *)a);
+    pthread_create(&pt[a + NUM_LANG * num_threads], NULL, BilbowaThread, (void *)a);
   }
   for (a = 0; a < (NUM_LANG + 1) * num_threads; a++) pthread_join(pt[a], NULL);
   // Save the word vectors

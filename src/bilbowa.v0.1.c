@@ -496,10 +496,13 @@ void BilBOWASentenceUpdate(int par_sen_len1, int par_sen_len2,
 
 /* Thread for performing the cross-lingual learning */
 void *BilbowaThread(void *id) {
-  int par_sen_len1, par_sen_len2, 
-      lang_id1 = (int)id / num_threads, 
-      lang_id2 = (int)id / num_threads + 1,
-      thread_id = (int)id % num_threads; // total_sampled;
+  int par_sen_len1, par_sen_len2;
+
+  // Each thread should work on both languages, so we do not need to obtain the lang_idX based on the thread_number
+  // TODO: Change this for more than two languages
+  int lang_id1 = 0, lang_id2 = 1; 
+  // Each thread will be responsible for reading a portion of both lang_id1 and lang_id2 files. portion size is: file_size/num_threads
+  int thread_id = (int)id % num_threads; // total_sampled;
   long long par_sen1[MAX_SEN_LEN], par_sen2[MAX_SEN_LEN],
     //        sampled_sen1[10], sampled_sen2[10],
             updates_l1 = 1, updates_l2 = 1,
@@ -523,12 +526,15 @@ void *BilbowaThread(void *id) {
   while (MONO_DONE_TRAINING < NUM_LANG * num_threads) {
     par_sen_len1 = ReadSent(fi_par1, lang_id1, par_sen1, 1);
     par_sen_len2 = ReadSent(fi_par2, lang_id2, par_sen2, 1);
-    /*for (i = 0; i < par_sen_len1; i++)
+/*
+    int i;
+    for (i = 0; i < par_sen_len1; i++)
       printf("%s ", vocabs[0][*(&par_sen1[i])].word);
     printf("\n");
     for (i = 0; i < par_sen_len2; i++) 
       printf("%s ", vocabs[1][*(&par_sen2[i])].word);
-    printf("\n"); */
+    printf("\n"); 
+*/
     if (feof(fi_par1) || feof(fi_par2) ||
         ftell(fi_par1) > f1_size / num_threads * (thread_id + 1) ||
         ftell(fi_par2) > f2_size / num_threads * (thread_id + 1)) {
@@ -591,6 +597,7 @@ void SaveModel(int lang_id, char *name) {
 
 /* Monolingual training thread */ 
 void *MonoModelThread(void *id) {
+  unsigned long long local_next_random = 0;
   long long a, b, d, word, last_word, sentence_length = 0, 
        sentence_position = 0;
   long long word_count = 0, last_word_count = 0, all_train_words = 0;
@@ -675,8 +682,8 @@ void *MonoModelThread(void *id) {
     if (word == -1) continue;
     for (c = 0; c < layer1_size; c++) neu1[c] = 0;
     for (c = 0; c < layer1_size; c++) neu1e[c] = 0;
-    next_random = next_random * (unsigned long long)25214903917 + 11;
-    b = next_random % window;
+    local_next_random = local_next_random * (unsigned long long)25214903917 + 11;
+    b = local_next_random % window;
     // CBOW ARCHITECTURE WITH NEGATIVE SAMPLING
     if (cbow) {
       for (d = 0; d < negative + 1; d++) {
@@ -684,9 +691,9 @@ void *MonoModelThread(void *id) {
           target = word;
           label = 1;
         } else {
-          next_random = next_random * (unsigned long long)25214903917 + 11;
-          target = tables[lang_id][(next_random >> 16) % table_size];
-          if (target == 0) target = next_random % (vocab_size - 1) + 1;
+          local_next_random = local_next_random * (unsigned long long)25214903917 + 11;
+          target = tables[lang_id][(local_next_random >> 16) % table_size];
+          if (target == 0) target = local_next_random % (vocab_size - 1) + 1;
           if (target == word) continue;
           label = 0;
         }
@@ -734,9 +741,9 @@ void *MonoModelThread(void *id) {
               target = word;
               label = 1;
             } else {
-              next_random = next_random * (unsigned long long)25214903917 + 11;
-              target = tables[lang_id][(next_random >> 16) % table_size];
-              if (target == 0) target = next_random % (vocab_size - 1) + 1;
+              local_next_random = local_next_random * (unsigned long long)25214903917 + 11;
+              target = tables[lang_id][(local_next_random >> 16) % table_size];
+              if (target == 0) target = local_next_random % (vocab_size - 1) + 1;
               if (target == word) continue;
               label = 0;
             }
@@ -834,9 +841,9 @@ void TrainModel() {
     if (debug_mode > 2) printf("Spawning mono thread %ld\n", a);
     pthread_create(&pt[a], NULL, MonoModelThread, (void *)a);
   }
-  for (a = 0; a < (NUM_LANG - 1) * num_threads; a++) {
+  for (a = NUM_LANG * num_threads ; a < (NUM_LANG + 1) * num_threads; a++) {
     if (debug_mode > 2) printf("Spawning parallel thread %ld\n", a);
-    pthread_create(&pt[a + NUM_LANG * num_threads], NULL, BilbowaThread, (void *)a);
+    pthread_create(&pt[a], NULL, BilbowaThread, (void *)(a));
   }
   for (a = 0; a < (NUM_LANG + 1) * num_threads; a++) pthread_join(pt[a], NULL);
   // Save the word vectors

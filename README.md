@@ -26,3 +26,15 @@ part of an open-source toolkit.
 
 arXiv:1410.2455
 Submitted on 9 Oct 2014
+
+
+## Compiling and using `Bilbowa`
+To compile, do the following
+
+    cd bilbowa
+    make all
+
+This creates `bilbowa` and `bidist` in the `bin` directory. 
+Run `bilbowa` to see the list of command line options.
+`bidist` is a modification of the distance module in the [word2vec package](https://github.com/danielfrg/word2vec). It receives 2 binary vectors (let's say English and French) as input, and for any given English word returns the list of the similar French words. Note that similar to the original distance module, it only works with the binary vectors (use `-binary 1` switch when calling `bilbowa` to train the system.)
+

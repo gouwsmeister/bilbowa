@@ -1,9 +1,8 @@
 bilbowa: src/bilbowa.v0.1.c 
 	mkdir -p bin
-	gcc src/bilbowa.v0.1.c -g -o bin/bilbowa -lm -pthread -march=native -funroll-loops -w 
+	gcc -std=c99 -Wall -O2 -march=native -funroll-loops src/bilbowa.v0.1.c -o bin/bilbowa -lm -pthread
 bidist: src/bidist.c
-	gcc src/bidist.c -g -o bin/bidist -lm -march=native -funroll-loops -w
+	gcc -std=c99 -Wall -O2 -march=native -funroll-loops src/bidist.c -o bin/bidist -lm
 all: bilbowa bidist
 clean:
-	rm bin/bilbowa bin/bidist
-
+	rm -fv bin/*

@@ -356,7 +356,7 @@ void InitNet(int lang_id) {
 
 char SubSample(int lang_id, long long word_id) {
   long long count = vocabs[lang_id][word_id].cn;
-  real thresh = (sqrt(count / (sample * train_words[lang_id])) + 1) * 
+  real thresh = (sqrtf(count / (sample * train_words[lang_id])) + 1) *
     (sample * train_words[lang_id]) / count;
   next_random = next_random * (unsigned long long)25214903917 + 11;
   if ((next_random & 0xFFFF) / (real)65536 > thresh) return 1;
@@ -395,7 +395,7 @@ void UpdateEmbeddings(real *embeddings, real *grads, int offset,
     if (adagrad) {
       // Use Adagrad for automatic learning rate selection
       grads[offset + a] += (deltas[a] * deltas[a]);
-      step = (alpha / fmax(epsilon, sqrt(grads[offset + a]))) * deltas[a];
+      step = (alpha / fmaxf(epsilon, sqrtf(grads[offset + a]))) * deltas[a];
     } else {
       // Regular SGD
       step = alpha * deltas[a];
@@ -457,7 +457,7 @@ void BuildCDF(real *cdf, long long *sen, int lang_id, int len) {
     }
     else if (PAR_SAMPLE && sample > 0) {  // subsample
       count = vocabs[lang_id][word].cn;
-      threshold = (sqrt(count / (sample * train_words[lang_id])) + 1) * (sample *
+      threshold = (sqrtf(count / (sample * train_words[lang_id])) + 1) * (sample *
         train_words[lang_id]) / count; 
       if (threshold < 0) threshold = 0.0;
     } 
@@ -805,7 +805,7 @@ void TrainModel() {
   expTable = malloc((EXP_TABLE_SIZE + 1) * sizeof(real));
   for (i = 0; i < EXP_TABLE_SIZE; i++) {
     // Precompute the exp() table
-    expTable[i] = exp((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP);
+    expTable[i] = expf((i / (real)EXP_TABLE_SIZE * 2 - 1) * MAX_EXP);
     // Precompute sigmoid f(x) = x / (x + 1)
     expTable[i] = expTable[i] / (expTable[i] + 1);
   }

@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
     for (a = 0; a < size_lang1; a++) fread(&M_lang1[a + b * size_lang1], sizeof(float), 1, f);
     len = 0;
     for (a = 0; a < size_lang1; a++) len += M_lang1[a + b * size_lang1] * M_lang1[a + b * size_lang1];
-    len = sqrt(len);
+    len = sqrtf(len);
     for (a = 0; a < size_lang1; a++) M_lang1[a + b * size_lang1] /= len;
   }
   fclose(f);
@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
     for (a = 0; a < size_lang2; a++) fread(&M_lang2[a + b * size_lang2], sizeof(float), 1, f);
     len = 0;
     for (a = 0; a < size_lang2; a++) len += M_lang2[a + b * size_lang2] * M_lang2[a + b * size_lang2];
-    len = sqrt(len);
+    len = sqrtf(len);
     for (a = 0; a < size_lang2; a++) M_lang2[a + b * size_lang2] /= len;
   }
   fclose(f);
@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
     }
     len = 0;
     for (a = 0; a < size_lang2; a++) len += vec[a] * vec[a];
-    len = sqrt(len);
+    len = sqrtf(len);
     for (a = 0; a < size_lang2; a++) vec[a] /= len;
     for (a = 0; a < N; a++) bestd[a] = 0;
     for (a = 0; a < N; a++) bestw[a][0] = 0;
